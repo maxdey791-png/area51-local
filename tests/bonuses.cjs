@@ -39,6 +39,7 @@ const URL = process.env.AREA51_TEST_URL || 'http://127.0.0.1:8000/';
       const ground=s.getGroundY(h.x),anchor=h.toGlobal({x:0,y:-350});
       return {balance:a.balance,finished:a.finished,die:h.die,y:h.y,top:h.getBounds().y,
         ground,air:Number.isFinite(ground)?ground-h.y:null,v:h.ySpeed,canJump:h.canJump,
+        feet:h.toGlobal({x:0,y:0}).y,zoom:s._area51Camera?.zoom,
         distance:s.currentDistance,anchor:{x:anchor.x,y:anchor.y},
         items:a.items.map(i=>({x:i.ground.x+i.offset,world:s.currentDistance*90+i.ground.x+i.offset,radius:i.radius,value:i.value}))};
     });
@@ -48,7 +49,7 @@ const URL = process.env.AREA51_TEST_URL || 'http://127.0.0.1:8000/';
     await page.waitForFunction(()=>area51Bonuses.balance===200);
     let initial=await state();
     assert(!initial.die);
-    assert(initial.y>500 && initial.y<720,'camera must settle the running surface in view');
+    assert(initial.feet>500 && initial.feet<740,'camera must settle the running surface in view');
     // Pause also makes a useful deterministic check that no balance accrues with time.
     await page.keyboard.press('F2');
     const paused=await state();await page.waitForTimeout(250);

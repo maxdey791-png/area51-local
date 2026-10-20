@@ -7,7 +7,7 @@
   const PRESETS = {veryRare: 6000, rare: 3600, medium: 2000, frequent: 1000};
   const DEFAULTS = {
     start: 100, target: 50000, currency: 'Bs', custom: '', frequency: 'rare',
-    spacing: 3600, bonusSize: 2.5, jumpStrength: 32, enabled: VALUES
+    spacing: 3600, bonusSize: 2.5, jumpStrength: 32, noLose: true, enabled: VALUES
   };
   const clamp = (n, min, max, fallback) => Number.isFinite(Number(n))
     ? Math.max(min, Math.min(max, Number(n))) : fallback;
@@ -22,6 +22,7 @@
       spacing: Math.round(clamp(value.spacing, 400, 50000, DEFAULTS.spacing)),
       bonusSize: clamp(value.bonusSize, 2, 3, DEFAULTS.bonusSize),
       jumpStrength: clamp(value.jumpStrength, 25, 38, DEFAULTS.jumpStrength),
+      noLose: value.noLose !== false,
       enabled: Array.isArray(value.enabled) ? VALUES.filter(n => value.enabled.includes(n))
         : VALUES.filter(n => n > 0 || !Array.isArray(value.multipliers) || value.multipliers.includes(-n))
     };
@@ -77,6 +78,7 @@
       <input name="spacing" type="number" min="400" max="50000" step="1" required></label>
     <label>Размер бонусов<select name="bonusSize"><option value="2">×2</option><option value="2.5">×2,5</option><option value="3">×3</option></select></label>
     <label>Сила прыжка (25–38)<input name="jumpStrength" type="number" min="25" max="38" step="1" required></label>
+    <label>Без проигрыша<select name="noLose"><option value="true">Вкл.</option><option value="false">Выкл.</option></select></label>
     <fieldset><legend>Доступные бонусы и множители</legend>${VALUES.map(n => `<label><input type="checkbox" name="enabled" value="${n}"> ${textFor(n)}</label>`).join('')}</fieldset>
     <p>Сохранение начинает новый забег с начальным балансом. Множители умножают текущий баланс.</p>
     <p id="bonus-status" role="status"></p>
@@ -117,7 +119,7 @@
     clearInput();
     if (finishDialog.open) finishDialog.close();
     const form = dialog.querySelector('form');
-    for (const k of ['start','target','currency','custom','frequency','spacing','bonusSize','jumpStrength']) form.elements[k].value = settings[k];
+    for (const k of ['start','target','currency','custom','frequency','spacing','bonusSize','jumpStrength','noLose']) form.elements[k].value = String(settings[k]);
     form.querySelectorAll('[name=enabled]').forEach(e => { e.checked = settings.enabled.includes(Number(e.value)); });
     dialog.querySelector('#bonus-status').textContent = '';
     updateSpacingControl(); dialog.showModal();
@@ -158,7 +160,8 @@
   dialog.querySelector('form').onsubmit = e => {
     e.preventDefault();
     const form = e.target;
-    const value = Object.fromEntries(['start','target','currency','custom','frequency','spacing','bonusSize','jumpStrength'].map(k => [k, form.elements[k].value]));
+    const value = Object.fromEntries(['start','target','currency','custom','frequency','spacing','bonusSize','jumpStrength','noLose'].map(k => [k, form.elements[k].value]));
+    value.noLose = value.noLose === 'true';
     value.enabled = [...form.querySelectorAll('[name=enabled]:checked')].map(e => Number(e.value));
     const next = normalize(value);
     if (next.target <= next.start) {
@@ -187,6 +190,7 @@
   function reset(scene) {
     activeScene = scene; balance = settings.start; finished = false; restarting = false;
     items = []; particles = []; seen = new WeakSet(); nextSpawnX = -Infinity;
+    scene._area51Camera = null; scene._area51Safe = null; scene._area51Rescues = 0; scene._area51RecoveryLaunch = false;
     if (finishDialog.open) finishDialog.close();
   }
   function spawn(scene) {
@@ -250,22 +254,54 @@
       glow.addColorStop(0,item.value>0?'#fff6b1':'#e9deff');glow.addColorStop(1,item.value>0?'#f4ae21':'#9062e9');
       ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);ctx.fillStyle=glow;ctx.fill();
       ctx.strokeStyle='#fff2c4';ctx.lineWidth=3;ctx.stroke();
-      label(textFor(item.value),p.x,p.y+radius*.21,'#fff',radius*.7,radius*1.85);
+      label(textFor(item.value),p.x,p.y+radius*.21,'#fff',Math.max(34,radius*.7),radius*1.85);
     }
     if (hero?.scale.x && !hero.die) {
       // Fixed local anchor, transformed with the hero and camera. Never use
       // getBounds(): animated limbs/particles change those bounds every frame.
       const anchor=point(hero,0,-350), right=point(hero,1,-350);
       const scale=Math.hypot(right.x-anchor.x,right.y-anchor.y);
-      label(amount(),anchor.x,anchor.y,'#afffd3',50*scale);
+      label(amount(),anchor.x,anchor.y,'#afffd3',Math.max(46,50*scale));
     }
     for (const particle of particles) {
       const p=point(scene.groundLayer,particle.x,particle.y);
       ctx.globalAlpha=particle.life/55;label(particle.text,p.x,p.y,'#fff39a',44);ctx.globalAlpha=1;
     }
   }
-  window.installArea51Bonuses = ({Gameplay, GroundItem, engine: game}) => {
+  window.installArea51Bonuses = ({Gameplay, GroundItem, RunHero, engine: game}) => {
     engine=game;
+    function viewport(scene) {
+      const camera=scene?._area51Camera;
+      const zoom=Math.min(camera?.zoom || 1,camera?.targetZoom || .75);
+      const x=camera?.world.x || 0;
+      return {left:-x/zoom,right:(engine.W-x)/zoom};
+    }
+    Object.defineProperty(GroundItem.prototype,'isNeedSpawnNext',{
+      configurable:true,get(){
+        if(!engine.currentScene?._area51Camera) return this.x+this.nextPosX<engine.W;
+        return this.x+this.nextPosX<viewport(engine.currentScene).right+240;
+      }
+    });
+    Object.defineProperty(GroundItem.prototype,'isPassedScreen',{
+      configurable:true,get(){
+        const scene=engine.currentScene;
+        if(!scene?._area51Camera) return this.x<-this.nextPosX;
+        if(settings.noLose && scene?._area51Safe?.ground===this) return false;
+        return this.x+this.nextPosX<viewport(scene).left-160;
+      }
+    });
+    const originalKill=RunHero.prototype.kill;
+    RunHero.prototype.kill=function(falling){
+      if(!settings.noLose) return originalKill.call(this,falling);
+      if(finished) return;
+      if(falling) recover(engine.currentScene,this);
+      // The caller still triggers the original enemy's catch animation.
+    };
+    const originalGameOver=Gameplay.prototype.gameOver;
+    Gameplay.prototype.gameOver=function(...args){
+      if(settings.noLose) return;
+      return originalGameOver.apply(this,args);
+    };
     const initGround=GroundItem.prototype.initGroundItem;
     GroundItem.prototype.initGroundItem=function(...args) {
       seen.delete(this);items=items.filter(item=>item.ground!==this);
@@ -275,38 +311,99 @@
     Gameplay.prototype.init=function(...args) {init.apply(this,args);reset(this);};
     Gameplay.prototype.update=function(...args) {
       if (dialog.open || finished || restarting) return;
+      if(settings.noLose && this._area51RecoveryLaunch) {
+        const hero=this.all['main-hero'];
+        this._area51RecoveryLaunch=false;
+        hero.ySpeed=-38;hero.canJump=false;hero.canAirRun=true;
+        hero.animate('jump');
+      }
       update.apply(this,args);
       if (engine.currentScene!==this || !this.all['main-hero']) return;
       items=items.filter(item=>item.ground.parent===this.groundLayer && this.groundLayer.children.includes(item.ground));
-      if (!this.all['main-hero'].die) {spawn(this);collect(this);}
+      const hero=this.all['main-hero'];
+      if(settings.noLose && hero.jumpEnabled && !finished) {
+        if(hero.die || hero.y>fallLimit(this)) recover(this,hero);
+        if(this.currentXSpeed>=0) this.currentXSpeed=-9;
+      }
+      rememberSafe(this,hero);
+      if (!hero.die) {spawn(this);collect(this);}
+      applyZoom(this);
       particles=particles.filter(p=>{p.y-=1.5;return --p.life>0;});
     };
+    function fallLimit(scene) {
+      const camera=scene?._area51Camera;
+      return (engine.H-(camera?.world.y || 0))/(camera?.zoom || 1)+250;
+    }
+    function rememberSafe(scene,hero) {
+      if(!hero.jumpEnabled || hero.die) return;
+      const groundY=scene.getGroundY(hero.x), ground=scene.currentGroundItem;
+      if(Number.isFinite(groundY) && ground?.parent===scene.groundLayer && Math.abs(hero.y-groundY)<24) {
+        scene._area51Safe={ground,offset:clamp(hero.x-ground.x,20,ground.groundWidth-20,ground.groundWidth/2)};
+      }
+    }
+    function recover(scene,hero) {
+      if(!scene?.groundLayer || !hero.jumpEnabled) return;
+      let safe=scene._area51Safe;
+      if(!safe || safe.ground.parent!==scene.groundLayer) {
+        const ground=scene.groundLayer.children.find(g=>g.groundWidth>80 && g.x+g.groundWidth>0);
+        if(!ground) return;
+        safe={ground,offset:ground.groundWidth/2};
+      }
+      // The retained last platform may have scrolled behind the viewport.
+      // Rewind terrain (not the player's balance) to return to that exact platform.
+      const delta=hero.x-(safe.ground.x+safe.offset);
+      if(Math.abs(delta)>.01) {
+        for(const ground of scene.groundLayer.children) ground.x+=delta;
+        for(const particle of particles) particle.x+=delta;
+        scene.currentDistance=Math.max(0,scene.currentDistance-delta/90);
+      }
+      hero.y=safe.ground.y+safe.offset/safe.ground.groundWidth*safe.ground.groundYShift;
+      hero.ySpeed=hero.xSpeed=0;hero.rotation=0;hero.die=false;
+      hero.canJump=true;hero.canAirRun=false;hero.jumpRePressed=false;
+      hero.animate('run');scene.currentXSpeed=-9;scene.currentYSpeed=0;
+      scene._area51Safe=safe;scene._area51Rescues++;
+      scene._area51LastRecovery={ground:safe.ground,x:hero.x,y:hero.y,balance};
+      scene._area51RecoveryLaunch=true;
+      clearInput();
+      particles.push({text:'Возврат',x:hero.x,y:hero.y-230,life:55});
+    }
+    function applyZoom(scene) {
+      const camera=scene._area51Camera;
+      if(!camera) return;
+      camera.world.scale.set(camera.zoom);
+      camera.world.x=scene.all['main-hero'].x*(1-camera.zoom);
+      camera.world.y=0;
+    }
     function updateCamera(scene) {
       const hero=scene.all['main-hero'];
       if (!hero?.jumpEnabled) {
-        // Preserve the original scripted breakout choreography and fast-forward.
         const reference=scene.groundLayer.children[7] || scene.latestGround;
         scene.currentYSpeed=(scene.currentYSpeed+.01*(engine.H/2+160-reference.y))*.8;
         return;
       }
       if (hero.die) {scene.currentYSpeed=0;return;}
-      const surface=scene.getGroundY(hero.x);
-      const predictedHead=hero.y+hero.ySpeed-365;
-      if (!Number.isFinite(surface)) {
-        // In a gap, preserve the camera's safety margin without following a fall.
-        scene.currentYSpeed=clamp(Math.max(scene.currentYSpeed*.8, predictedHead<95 ? 95-predictedHead : 0),-38,38,0);
-        return;
+      if(!scene._area51Camera) {
+        const world=hero.parent;
+        world.stop(); // Only the finished intro zoom timeline; child animations continue.
+        scene._area51Camera={world,zoom:world.scale.x,targetZoom:.75};
       }
-      const baseline=engine.H*.82;
-      const airHeight=Math.max(0,surface-hero.y);
-      // Follow the ground at the runner, not the eighth platform ahead.
-      // Lift the camera during a high jump while keeping actual jump velocity.
-      const desired=baseline+Math.max(0,airHeight-(baseline-455));
-      let speed=(desired-surface)*.14;
-      if (predictedHead<95) speed=Math.max(speed,95-predictedHead);
-      scene.currentYSpeed=clamp(speed,-38,38,0);
+      const camera=scene._area51Camera;
+      const surface=scene.getGroundY(hero.x);
+      // When jumping over a gap, use the nearest landing platform as the reference.
+      const landing=scene.groundLayer.children.find(g=>g.x+g.groundWidth>hero.x && g.groundWidth>0);
+      const ground=Number.isFinite(surface)?surface:landing?.y;
+      const air=Number.isFinite(ground)?Math.max(0,ground-hero.y):0;
+      const remaining=hero.ySpeed<0?hero.ySpeed*hero.ySpeed/3:0;
+      // Predict the apex early; keep both the head and landing surface in frame.
+      camera.targetZoom=clamp((engine.H*.82-105)/(air+remaining+365),.45,.75,.75);
+      camera.zoom+=(camera.targetZoom-camera.zoom)*.07;
+      applyZoom(scene);
+      if(!Number.isFinite(ground)) {scene.currentYSpeed*=.8;return;}
+      const desired=engine.H*.82/camera.zoom;
+      const targetSpeed=clamp((desired-ground)*.09,-18,18,0);
+      scene.currentYSpeed=scene.currentYSpeed*.55+targetSpeed*.45;
     }
-    const api={engine,updateCamera,
+    const api={engine,updateCamera,fallLimit,
       get balance(){return balance;},get finished(){return finished;},
       get settings(){return {...settings,enabled:[...settings.enabled]};},
       get items(){return items.map(item=>({...item}));}
