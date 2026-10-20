@@ -32,7 +32,7 @@ const URL = process.env.AREA51_TEST_URL || 'http://127.0.0.1:8000/';
       for(const box of await page.locator('[name=enabled]').all())
         await box.setChecked(enabled.includes(Number(await box.getAttribute('value'))));
       await page.locator('[type=submit]').click();
-      await page.waitForFunction(()=>area51Bonuses.engine.currentScene.name==='level/1' && area51Bonuses.engine.currentScene.all['main-hero'].jumpEnabled);
+      await page.waitForFunction(()=>!area51Bonuses.restarting && area51Bonuses.engine.currentScene.name==='level/1' && area51Bonuses.engine.currentScene.all['main-hero'].jumpEnabled);
     }
     const state = () => page.evaluate(()=>{
       const a=area51Bonuses,s=a.engine.currentScene,h=s.all['main-hero'];
@@ -94,7 +94,7 @@ const URL = process.env.AREA51_TEST_URL || 'http://127.0.0.1:8000/';
     await page.waitForFunction(()=>area51Bonuses.finished);
     assert.equal((await state()).balance,300);
     await page.locator('#bonus-finish').waitFor({state:'visible'});
-    assert.match(await page.locator('.finish-balance').innerText(),/300 Bs/);
+    assert.match(await page.locator('#bonus-finish .finish-balance').innerText(),/300 Bs/);
     const finish=await state();await page.waitForTimeout(350);
     assert.equal((await state()).distance,finish.distance);
     assert.equal((await state()).y,finish.y);
@@ -109,7 +109,7 @@ const URL = process.env.AREA51_TEST_URL || 'http://127.0.0.1:8000/';
     assert(large.items.length>0 && large.items.every(item=>item.radius===72));
     await page.waitForFunction(()=>area51Bonuses.finished);
     assert.equal((await state()).balance,1000);
-    assert.match(await page.locator('.finish-balance').innerText(),/1.000 Bs/);
+    assert.match(await page.locator('#bonus-finish .finish-balance').innerText(),/1.000 Bs/);
     console.log('Multiplier overshoot finish: 100 × 10 = 1000, target 800');
     // Full configuration persistence, including disabling every pickup.
     await configure({target:50000,frequency:'custom',spacing:1234,enabled:[],currency:'custom',custom:'★',jumpStrength:35,bonusSize:'3'});
@@ -119,7 +119,7 @@ const URL = process.env.AREA51_TEST_URL || 'http://127.0.0.1:8000/';
     assert.equal(saved.spacing,1234);assert.equal(saved.jumpStrength,35);
     assert.equal(saved.bonusSize,3);assert.equal(saved.custom,'★');assert.deepEqual(saved.enabled,[]);
     await page.evaluate(()=>{window.isNotFirstRun=true;area51Bonuses.engine.replaceScene('level/1');});
-    await page.waitForFunction(()=>area51Bonuses.engine.currentScene.name==='level/1' && area51Bonuses.engine.currentScene.all['main-hero']?.jumpEnabled);
+    await page.waitForFunction(()=>!area51Bonuses.restarting && area51Bonuses.engine.currentScene.name==='level/1' && area51Bonuses.engine.currentScene.all['main-hero']?.jumpEnabled);
     await page.waitForTimeout(300);
     assert.equal((await state()).items.length,0);
     assert.deepEqual(errors,[]);

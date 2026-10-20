@@ -42,24 +42,25 @@
 
   const style = document.createElement('style');
   style.textContent = `
-    #bonus-settings,#bonus-finish{box-sizing:border-box;border:1px solid #63f1b1;border-radius:22px;
+    #bonus-settings,:is(#bonus-finish,#bonus-death){box-sizing:border-box;border:1px solid #63f1b1;border-radius:22px;
       background:linear-gradient(145deg,#173e32,#081d22);color:#effff6;font:17px system-ui;
       width:min(560px,94vw);max-height:90dvh;overflow:auto;padding:28px;box-shadow:0 20px 90px #000a}
-    #bonus-settings::backdrop,#bonus-finish::backdrop{background:#03150dd9;backdrop-filter:blur(6px)}
-    #bonus-settings h2,#bonus-finish h2{margin-top:0}
+    #bonus-settings::backdrop,:is(#bonus-finish,#bonus-death)::backdrop{background:#03150dd9;backdrop-filter:blur(6px)}
+    #bonus-settings h2,:is(#bonus-finish,#bonus-death) h2{margin-top:0}
+    #bonus-settings [hidden]{display:none}
     #bonus-settings label{display:block;margin:12px 0}
     #bonus-settings input:not([type=checkbox]),#bonus-settings select{box-sizing:border-box;display:block;
       width:100%;padding:9px;margin-top:5px;border:1px solid #75cba0;border-radius:6px;font:inherit}
     #bonus-settings fieldset{border:1px solid #629c84;border-radius:8px;margin:16px 0}
     #bonus-settings fieldset label{display:inline-block;min-width:90px;margin:8px}
-    #bonus-settings button,#bonus-finish button,#bonus-open{font:bold 16px system-ui;padding:12px 18px;
+    #bonus-settings button,:is(#bonus-finish,#bonus-death) button,#bonus-open{font:bold 16px system-ui;padding:12px 18px;
       border:0;border-radius:9px;background:#83ffc0;color:#10241e;cursor:pointer}
-    #bonus-settings button:focus-visible,#bonus-finish button:focus-visible{outline:3px solid #fff}
-    #bonus-open{position:fixed;bottom:12px;right:12px;z-index:20}
-    #bonus-status{color:#ffda86}#bonus-finish{text-align:center}
-    #bonus-finish .finish-icon{font-size:76px;color:#ffdc6a}
-    #bonus-finish .finish-balance{font-size:clamp(30px,5vw,52px);font-weight:900;color:#a5ffcd;overflow-wrap:anywhere;margin:24px 0}
-    #bonus-finish button{margin:6px}#bonus-finish small{display:block;margin-top:22px;color:#c0d8cc}
+    #bonus-settings button:focus-visible,:is(#bonus-finish,#bonus-death) button:focus-visible{outline:3px solid #fff}
+    #bonus-open{position:fixed;bottom:max(12px,env(safe-area-inset-bottom));right:12px;z-index:20}
+    #bonus-status{color:#ffda86}:is(#bonus-finish,#bonus-death){text-align:center}
+    :is(#bonus-finish,#bonus-death) .finish-icon{font-size:76px;color:#ffdc6a}
+    :is(#bonus-finish,#bonus-death) .finish-balance{font-size:clamp(30px,5vw,52px);font-weight:900;color:#a5ffcd;overflow-wrap:anywhere;margin:24px 0}
+    :is(#bonus-finish,#bonus-death) button{margin:6px}:is(#bonus-finish,#bonus-death) small{display:block;margin-top:22px;color:#c0d8cc}
   `;
   document.head.append(style);
   const dialog = document.createElement('dialog');
@@ -78,7 +79,7 @@
       <input name="spacing" type="number" min="400" max="50000" step="1" required></label>
     <label>Размер бонусов<select name="bonusSize"><option value="2">×2</option><option value="2.5">×2,5</option><option value="3">×3</option></select></label>
     <label>Сила прыжка (25–38)<input name="jumpStrength" type="number" min="25" max="38" step="1" required></label>
-    <label>Без проигрыша<select name="noLose"><option value="true">Вкл.</option><option value="false">Выкл.</option></select></label>
+    <label>Без проигрыша<select name="noLose"><option value="true">Вкл.</option><option value="false">Выкл.</option></select></label><small>Защита от змей и ловушек. Падение в пропасть завершает забег.</small>
     <fieldset><legend>Доступные бонусы и множители</legend>${VALUES.map(n => `<label><input type="checkbox" name="enabled" value="${n}"> ${textFor(n)}</label>`).join('')}</fieldset>
     <p>Сохранение начинает новый забег с начальным балансом. Множители умножают текущий баланс.</p>
     <p id="bonus-status" role="status"></p>
@@ -93,6 +94,10 @@
     <button type="button" id="bonus-configure">Настройки</button>
     <small>Только виртуальные игровые очки. Без реальных ставок и выплат.</small>`;
   document.body.append(finishDialog);
+  const deathDialog=document.createElement('dialog');
+  deathDialog.id='bonus-death';
+  deathDialog.innerHTML='<h2>Game Over</h2><p>Забег завершён</p><div class="finish-balance"></div><button type="button" id="death-restart">Играть заново</button><button type="button" id="death-settings">Настройки</button>';
+  document.body.append(deathDialog);
   const openButton = document.createElement('button');
   openButton.id = 'bonus-open'; openButton.textContent = 'Настройки · F2'; document.body.append(openButton);
 
@@ -101,13 +106,19 @@
     for (const k of Object.keys(engine.keys.all)) engine.keys.all[k] = false;
     engine.mouse.click = false;
   }
+  function focusGame() {
+    const canvas=document.querySelector('canvas:not(#area51-bonuses)');
+    if(canvas){canvas.tabIndex=0;canvas.focus({preventScroll:true});}
+  }
   function restart() {
     clearInput();
     if (finishDialog.open) finishDialog.close();
+    if (deathDialog.open) deathDialog.close();
     finished = false; restarting = true; balance = settings.start;
     // The original init may reuse pooled scenes; reset in init, not by identity.
     window.isNotFirstRun = true;
     engine.replaceScene('level/1');
+    focusGame();
   }
   function updateSpacingControl() {
     const custom = dialog.querySelector('[name=frequency]').value === 'custom';
@@ -118,6 +129,7 @@
     if (dialog.open) return;
     clearInput();
     if (finishDialog.open) finishDialog.close();
+    if (deathDialog.open) deathDialog.close();
     const form = dialog.querySelector('form');
     for (const k of ['start','target','currency','custom','frequency','spacing','bonusSize','jumpStrength','noLose']) form.elements[k].value = String(settings[k]);
     form.querySelectorAll('[name=enabled]').forEach(e => { e.checked = settings.enabled.includes(Number(e.value)); });
@@ -129,6 +141,13 @@
     finishDialog.querySelector('.finish-balance').textContent = amount();
     finishDialog.showModal();
   }
+  function showGameOver() {
+    if(dialog.open || deathDialog.open || restarting || finished) return;
+    clearInput();deathDialog.querySelector('.finish-balance').textContent=amount();deathDialog.showModal();
+  }
+  deathDialog.querySelector('#death-restart').onclick=restart;
+  deathDialog.querySelector('#death-settings').onclick=showSettings;
+  deathDialog.addEventListener('cancel',e=>e.preventDefault());
   function complete(scene) {
     if (finished) return;
     finished = true; clearInput();
@@ -141,7 +160,7 @@
   openButton.onclick = showSettings;
   dialog.querySelector('#bonus-close').onclick = () => dialog.close();
   dialog.querySelector('[name=frequency]').onchange = updateSpacingControl;
-  dialog.addEventListener('close', () => { if (finished) showFinish(); });
+  dialog.addEventListener('close', () => { if (finished) showFinish(); else if(!restarting && activeScene?.all?.['main-hero']?.die) showGameOver(); else focusGame(); });
   finishDialog.addEventListener('cancel', e => e.preventDefault());
   finishDialog.querySelector('#bonus-restart').onclick = restart;
   finishDialog.querySelector('#bonus-configure').onclick = showSettings;
@@ -149,12 +168,12 @@
     if (e.key === 'F2') {
       e.preventDefault(); e.stopImmediatePropagation();
       dialog.open ? dialog.close() : showSettings();
-    } else if (dialog.open || finishDialog.open) {
+    } else if (dialog.open || finishDialog.open || deathDialog.open) {
       // Keep normal typing, dialog navigation and Escape; isolate game listeners.
       e.stopPropagation();
     }
   }, true);
-  for (const d of [dialog, finishDialog]) {
+  for (const d of [dialog, finishDialog, deathDialog]) {
     for (const event of ['pointerdown','mousedown','touchstart']) d.addEventListener(event, e => e.stopPropagation());
   }
   dialog.querySelector('form').onsubmit = e => {
@@ -190,8 +209,9 @@
   function reset(scene) {
     activeScene = scene; balance = settings.start; finished = false; restarting = false;
     items = []; particles = []; seen = new WeakSet(); nextSpawnX = -Infinity;
-    scene._area51Camera = null; scene._area51Safe = null; scene._area51Rescues = 0; scene._area51RecoveryLaunch = false;
+    scene._area51Camera = null; scene._area51FallingDeath=false; scene._area51DeathAt=null;
     if (finishDialog.open) finishDialog.close();
+    if (deathDialog.open) deathDialog.close();
   }
   function spawn(scene) {
     const hero = scene.all['main-hero'];
@@ -259,9 +279,12 @@
     if (hero?.scale.x && !hero.die) {
       // Fixed local anchor, transformed with the hero and camera. Never use
       // getBounds(): animated limbs/particles change those bounds every frame.
-      const anchor=point(hero,0,-350), right=point(hero,1,-350);
-      const scale=Math.hypot(right.x-anchor.x,right.y-anchor.y);
-      label(amount(),anchor.x,anchor.y,'#afffd3',Math.max(46,50*scale));
+      const anchor=point(hero,0,-350);
+      const width=engine.pixiApp.renderer.screen.width;
+      const available=Math.max(80,2*Math.min(anchor.x-8,width-anchor.x-8));
+      ctx.font='900 46px system-ui';
+      const size=Math.max(24,Math.min(46,46*available/ctx.measureText(amount()).width));
+      label(amount(),anchor.x,anchor.y,'#afffd3',size,available);
     }
     for (const particle of particles) {
       const p=point(scene.groundLayer,particle.x,particle.y);
@@ -270,6 +293,22 @@
   }
   window.installArea51Bonuses = ({Gameplay, GroundItem, RunHero, engine: game}) => {
     engine=game;
+    // Use the engine's existing resize/render-resolution system in either orientation.
+    Object.assign(window._thingEngineAssets.projectDesc,{
+      screenOrientation:'auto',portraitWidth:390,portraitHeight:844,
+      dynamicStageSize:true,autoFullscreenMobile:false
+    });
+    function resize(){
+      engine.onResize();
+      const scene=engine.currentScene;
+      if(scene?._area51Camera) {
+        scene._area51Camera.targetZoom=fixedZoom();
+        scene._area51Camera.zoom=scene._area51Camera.targetZoom;
+        applyZoom(scene);
+      }
+    }
+    window.addEventListener('resize',resize);
+    window.visualViewport?.addEventListener('resize',resize);
     function viewport(scene) {
       const camera=scene?._area51Camera;
       const zoom=Math.min(camera?.zoom || 1,camera?.targetZoom || .75);
@@ -286,20 +325,21 @@
       configurable:true,get(){
         const scene=engine.currentScene;
         if(!scene?._area51Camera) return this.x<-this.nextPosX;
-        if(settings.noLose && scene?._area51Safe?.ground===this) return false;
         return this.x+this.nextPosX<viewport(scene).left-160;
       }
     });
     const originalKill=RunHero.prototype.kill;
     RunHero.prototype.kill=function(falling){
-      if(!settings.noLose) return originalKill.call(this,falling);
-      if(finished) return;
-      if(falling) recover(engine.currentScene,this);
-      // The caller still triggers the original enemy's catch animation.
+      if(finished || this.die) return;
+      if(!falling && settings.noLose) return;
+      const scene=engine.currentScene;
+      scene._area51FallingDeath=!!falling;
+      return originalKill.call(this,falling);
     };
     const originalGameOver=Gameplay.prototype.gameOver;
     Gameplay.prototype.gameOver=function(...args){
-      if(settings.noLose) return;
+      if(settings.noLose && !this._area51FallingDeath) return;
+      this._area51DeathAt=performance.now();
       return originalGameOver.apply(this,args);
     };
     const initGround=GroundItem.prototype.initGroundItem;
@@ -310,101 +350,65 @@
     const init=Gameplay.prototype.init, update=Gameplay.prototype.update;
     Gameplay.prototype.init=function(...args) {init.apply(this,args);reset(this);};
     Gameplay.prototype.update=function(...args) {
-      if (dialog.open || finished || restarting) return;
-      if(settings.noLose && this._area51RecoveryLaunch) {
-        const hero=this.all['main-hero'];
-        this._area51RecoveryLaunch=false;
-        hero.ySpeed=-38;hero.canJump=false;hero.canAirRun=true;
-        hero.animate('jump');
-      }
+      if (dialog.open || deathDialog.open || finished || restarting) return;
       update.apply(this,args);
       if (engine.currentScene!==this || !this.all['main-hero']) return;
       items=items.filter(item=>item.ground.parent===this.groundLayer && this.groundLayer.children.includes(item.ground));
       const hero=this.all['main-hero'];
-      if(settings.noLose && hero.jumpEnabled && !finished) {
-        if(hero.die || hero.y>fallLimit(this)) recover(this,hero);
-        if(this.currentXSpeed>=0) this.currentXSpeed=-9;
-      }
-      rememberSafe(this,hero);
       if (!hero.die) {spawn(this);collect(this);}
       applyZoom(this);
+      if(hero.die && this._area51DeathAt!==null && performance.now()-this._area51DeathAt>500) showGameOver();
       particles=particles.filter(p=>{p.y-=1.5;return --p.life>0;});
     };
     function fallLimit(scene) {
       const camera=scene?._area51Camera;
       return (engine.H-(camera?.world.y || 0))/(camera?.zoom || 1)+250;
     }
-    function rememberSafe(scene,hero) {
-      if(!hero.jumpEnabled || hero.die) return;
-      const groundY=scene.getGroundY(hero.x), ground=scene.currentGroundItem;
-      if(Number.isFinite(groundY) && ground?.parent===scene.groundLayer && Math.abs(hero.y-groundY)<24) {
-        scene._area51Safe={ground,offset:clamp(hero.x-ground.x,20,ground.groundWidth-20,ground.groundWidth/2)};
-      }
-    }
-    function recover(scene,hero) {
-      if(!scene?.groundLayer || !hero.jumpEnabled) return;
-      let safe=scene._area51Safe;
-      if(!safe || safe.ground.parent!==scene.groundLayer) {
-        const ground=scene.groundLayer.children.find(g=>g.groundWidth>80 && g.x+g.groundWidth>0);
-        if(!ground) return;
-        safe={ground,offset:ground.groundWidth/2};
-      }
-      // The retained last platform may have scrolled behind the viewport.
-      // Rewind terrain (not the player's balance) to return to that exact platform.
-      const delta=hero.x-(safe.ground.x+safe.offset);
-      if(Math.abs(delta)>.01) {
-        for(const ground of scene.groundLayer.children) ground.x+=delta;
-        for(const particle of particles) particle.x+=delta;
-        scene.currentDistance=Math.max(0,scene.currentDistance-delta/90);
-      }
-      hero.y=safe.ground.y+safe.offset/safe.ground.groundWidth*safe.ground.groundYShift;
-      hero.ySpeed=hero.xSpeed=0;hero.rotation=0;hero.die=false;
-      hero.canJump=true;hero.canAirRun=false;hero.jumpRePressed=false;
-      hero.animate('run');scene.currentXSpeed=-9;scene.currentYSpeed=0;
-      scene._area51Safe=safe;scene._area51Rescues++;
-      scene._area51LastRecovery={ground:safe.ground,x:hero.x,y:hero.y,balance};
-      scene._area51RecoveryLaunch=true;
-      clearInput();
-      particles.push({text:'Возврат',x:hero.x,y:hero.y-230,life:55});
+    function fixedZoom() {
+      // Fit the configured maximum jump, once per viewport/settings change.
+      // It never depends on the hero's current jump or velocity.
+      return clamp(Math.min(engine.W/800,(engine.H*.65-110)/(365+settings.jumpStrength*settings.jumpStrength/3)),.2,.75,.6);
     }
     function applyZoom(scene) {
       const camera=scene._area51Camera;
       if(!camera) return;
       camera.world.scale.set(camera.zoom);
-      camera.world.x=scene.all['main-hero'].x*(1-camera.zoom);
-      camera.world.y=0;
+      camera.world.x=Math.min(207,engine.W*.24)-scene.all['main-hero'].x*camera.zoom;
+      camera.world.y=engine.H*.65-camera.referenceY*camera.zoom;
     }
     function updateCamera(scene) {
       const hero=scene.all['main-hero'];
-      if (!hero?.jumpEnabled) {
+      if(!hero?.jumpEnabled) {
         const reference=scene.groundLayer.children[7] || scene.latestGround;
         scene.currentYSpeed=(scene.currentYSpeed+.01*(engine.H/2+160-reference.y))*.8;
         return;
       }
-      if (hero.die) {scene.currentYSpeed=0;return;}
-      if(!scene._area51Camera) {
-        const world=hero.parent;
-        world.stop(); // Only the finished intro zoom timeline; child animations continue.
-        scene._area51Camera={world,zoom:world.scale.x,targetZoom:.75};
-      }
-      const camera=scene._area51Camera;
+      // Physics remains in level coordinates. Only the parent camera transform moves.
+      scene.currentYSpeed=0;
+      if(hero.die) return;
       const surface=scene.getGroundY(hero.x);
-      // When jumping over a gap, use the nearest landing platform as the reference.
       const landing=scene.groundLayer.children.find(g=>g.x+g.groundWidth>hero.x && g.groundWidth>0);
       const ground=Number.isFinite(surface)?surface:landing?.y;
-      const air=Number.isFinite(ground)?Math.max(0,ground-hero.y):0;
-      const remaining=hero.ySpeed<0?hero.ySpeed*hero.ySpeed/3:0;
-      // Predict the apex early; keep both the head and landing surface in frame.
-      camera.targetZoom=clamp((engine.H*.82-105)/(air+remaining+365),.45,.75,.75);
-      camera.zoom+=(camera.targetZoom-camera.zoom)*.07;
+      if(!scene._area51Camera) {
+        const world=hero.parent;world.stop();
+        scene._area51Camera={world,zoom:world.scale.x,targetZoom:fixedZoom(),referenceY:ground || hero.y};
+      }
+      const camera=scene._area51Camera;
+      camera.targetZoom=fixedZoom();
+      camera.zoom+=(camera.targetZoom-camera.zoom)*.12;
+      if(Number.isFinite(ground)) {
+        const error=ground-camera.referenceY;
+        const screenError=Math.abs(error*camera.zoom);
+        // A terrain-only dead zone: jumping cannot alter this reference.
+        if(screenError>engine.H*.025) {
+          const factor=screenError>engine.H*.07?.10:.05;
+          camera.referenceY+=clamp(error*factor,-6,6,0);
+        }
+      }
       applyZoom(scene);
-      if(!Number.isFinite(ground)) {scene.currentYSpeed*=.8;return;}
-      const desired=engine.H*.82/camera.zoom;
-      const targetSpeed=clamp((desired-ground)*.09,-18,18,0);
-      scene.currentYSpeed=scene.currentYSpeed*.55+targetSpeed*.45;
     }
     const api={engine,updateCamera,fallLimit,
-      get balance(){return balance;},get finished(){return finished;},
+      get restarting(){return restarting;},get balance(){return balance;},get finished(){return finished;},
       get settings(){return {...settings,enabled:[...settings.enabled]};},
       get items(){return items.map(item=>({...item}));}
     };
