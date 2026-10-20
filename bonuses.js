@@ -1,99 +1,318 @@
-/* Optional extension of the original Area 51 gameplay. No physics changes. */
+/* Area 51 extension: original scenes, hero physics, animations, assets and sound. */
 (() => {
   'use strict';
   const KEY = 'area51.virtual-bonuses.v1';
-  const defaults = {start: 0, currency: 'Bs', custom: '', frequency: 55, multipliers: [2, 3, 5, 10]};
-  const normalize = value => ({
-    start: Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Number(value.start) || 0)),
-    currency: ['Bs', 'PHP', 'THB', 'USD', 'RUB', 'custom'].includes(value.currency) ? value.currency : 'Bs',
-    custom: String(value.custom || '').slice(0, 12),
-    frequency: Math.max(0, Math.min(100, Number(value.frequency) || 0)),
-    multipliers: [2, 3, 5, 10].filter(n => Array.isArray(value.multipliers) && value.multipliers.includes(n))
-  });
-  let settings = {...defaults};
-  try { const stored = localStorage.getItem(KEY); if (stored) settings = normalize(JSON.parse(stored)); } catch {}
-  let balance = settings.start, activeScene, particles = [], seen = new WeakSet(), items = [];
+  const MAX = Number.MAX_SAFE_INTEGER;
+  const VALUES = [100, 500, 1000, 5000, -2, -3, -5, -10];
+  const PRESETS = {veryRare: 6000, rare: 3600, medium: 2000, frequent: 1000};
+  const DEFAULTS = {
+    start: 100, target: 50000, currency: 'Bs', custom: '', frequency: 'rare',
+    spacing: 3600, bonusSize: 2.5, jumpStrength: 32, enabled: VALUES
+  };
+  const clamp = (n, min, max, fallback) => Number.isFinite(Number(n))
+    ? Math.max(min, Math.min(max, Number(n))) : fallback;
+  function normalize(value = {}) {
+    return {
+      start: Math.floor(clamp(value.start, 0, MAX, DEFAULTS.start)),
+      target: Math.floor(clamp(value.target, 1, MAX, DEFAULTS.target)),
+      currency: ['Bs', 'PHP', 'THB', 'USD', 'RUB', 'custom'].includes(value.currency) ? value.currency : 'Bs',
+      custom: String(value.custom || '').slice(0, 12),
+      // Migrate the old percent-based setting to the new sparse default.
+      frequency: [...Object.keys(PRESETS), 'custom'].includes(value.frequency) ? value.frequency : 'rare',
+      spacing: Math.round(clamp(value.spacing, 400, 50000, DEFAULTS.spacing)),
+      bonusSize: clamp(value.bonusSize, 2, 3, DEFAULTS.bonusSize),
+      jumpStrength: clamp(value.jumpStrength, 25, 38, DEFAULTS.jumpStrength),
+      enabled: Array.isArray(value.enabled) ? VALUES.filter(n => value.enabled.includes(n))
+        : VALUES.filter(n => n > 0 || !Array.isArray(value.multipliers) || value.multipliers.includes(-n))
+    };
+  }
+  let settings = normalize(DEFAULTS);
+  try {
+    const stored = localStorage.getItem(KEY);
+    if (stored) settings = normalize(JSON.parse(stored) || {});
+  } catch { /* A browser without storage can still play with defaults. */ }
+  let balance = settings.start;
+  let activeScene, finished = false, restarting = false, nextSpawnX = -Infinity;
+  let items = [], particles = [], seen = new WeakSet();
+  let engine;
+  const textFor = value => value > 0 ? `+${value}` : `×${-value}`;
+  const currency = () => settings.currency === 'custom' ? settings.custom : settings.currency;
+  const amount = () => `${balance.toLocaleString('ru-RU')} ${currency()}`.trim();
+
+  const style = document.createElement('style');
+  style.textContent = `
+    #bonus-settings,#bonus-finish{box-sizing:border-box;border:1px solid #63f1b1;border-radius:22px;
+      background:linear-gradient(145deg,#173e32,#081d22);color:#effff6;font:17px system-ui;
+      width:min(560px,94vw);max-height:90dvh;overflow:auto;padding:28px;box-shadow:0 20px 90px #000a}
+    #bonus-settings::backdrop,#bonus-finish::backdrop{background:#03150dd9;backdrop-filter:blur(6px)}
+    #bonus-settings h2,#bonus-finish h2{margin-top:0}
+    #bonus-settings label{display:block;margin:12px 0}
+    #bonus-settings input:not([type=checkbox]),#bonus-settings select{box-sizing:border-box;display:block;
+      width:100%;padding:9px;margin-top:5px;border:1px solid #75cba0;border-radius:6px;font:inherit}
+    #bonus-settings fieldset{border:1px solid #629c84;border-radius:8px;margin:16px 0}
+    #bonus-settings fieldset label{display:inline-block;min-width:90px;margin:8px}
+    #bonus-settings button,#bonus-finish button,#bonus-open{font:bold 16px system-ui;padding:12px 18px;
+      border:0;border-radius:9px;background:#83ffc0;color:#10241e;cursor:pointer}
+    #bonus-settings button:focus-visible,#bonus-finish button:focus-visible{outline:3px solid #fff}
+    #bonus-open{position:fixed;bottom:12px;right:12px;z-index:20}
+    #bonus-status{color:#ffda86}#bonus-finish{text-align:center}
+    #bonus-finish .finish-icon{font-size:76px;color:#ffdc6a}
+    #bonus-finish .finish-balance{font-size:clamp(30px,5vw,52px);font-weight:900;color:#a5ffcd;overflow-wrap:anywhere;margin:24px 0}
+    #bonus-finish button{margin:6px}#bonus-finish small{display:block;margin-top:22px;color:#c0d8cc}
+  `;
+  document.head.append(style);
+  const dialog = document.createElement('dialog');
+  dialog.id = 'bonus-settings';
+  dialog.innerHTML = `<form>
+    <h2>Настройки игры · F2</h2><p>Виртуальные очки · без ставок и выплат</p>
+    <label>Начальный баланс<input name="start" type="number" min="0" max="${MAX}" step="1" required></label>
+    <label>Целевой баланс<input name="target" type="number" min="1" max="${MAX}" step="1" required></label>
+    <label>Валюта<select name="currency">${['Bs','PHP','THB','USD','RUB'].map(s => `<option>${s}</option>`).join('')}<option value="custom">Свой символ</option></select></label>
+    <label>Свой символ<input name="custom" maxlength="12"></label>
+    <label>Частота появления бонусов<select name="frequency">
+      <option value="veryRare">Очень редко</option><option value="rare">Редко</option>
+      <option value="medium">Средне</option><option value="frequent">Часто</option>
+      <option value="custom">Своя частота</option></select></label>
+    <label id="bonus-spacing">Минимальное расстояние между бонусами (единицы мира)
+      <input name="spacing" type="number" min="400" max="50000" step="1" required></label>
+    <label>Размер бонусов<select name="bonusSize"><option value="2">×2</option><option value="2.5">×2,5</option><option value="3">×3</option></select></label>
+    <label>Сила прыжка (25–38)<input name="jumpStrength" type="number" min="25" max="38" step="1" required></label>
+    <fieldset><legend>Доступные бонусы и множители</legend>${VALUES.map(n => `<label><input type="checkbox" name="enabled" value="${n}"> ${textFor(n)}</label>`).join('')}</fieldset>
+    <p>Сохранение начинает новый забег с начальным балансом. Множители умножают текущий баланс.</p>
+    <p id="bonus-status" role="status"></p>
+    <button type="submit">Сохранить и играть</button> <button type="button" id="bonus-close">Закрыть</button>
+  </form>`;
+  document.body.append(dialog);
+  const finishDialog = document.createElement('dialog');
+  finishDialog.id = 'bonus-finish';
+  finishDialog.innerHTML = `<div class="finish-icon" aria-hidden="true">✦</div><h2>Финиш! Цель достигнута</h2>
+    <p>Ваш итоговый баланс</p><div class="finish-balance"></div>
+    <button type="button" id="bonus-restart">Играть заново</button>
+    <button type="button" id="bonus-configure">Настройки</button>
+    <small>Только виртуальные игровые очки. Без реальных ставок и выплат.</small>`;
+  document.body.append(finishDialog);
+  const openButton = document.createElement('button');
+  openButton.id = 'bonus-open'; openButton.textContent = 'Настройки · F2'; document.body.append(openButton);
+
+  function clearInput() {
+    if (!engine?.keys) return;
+    for (const k of Object.keys(engine.keys.all)) engine.keys.all[k] = false;
+    engine.mouse.click = false;
+  }
+  function restart() {
+    clearInput();
+    if (finishDialog.open) finishDialog.close();
+    finished = false; restarting = true; balance = settings.start;
+    // The original init may reuse pooled scenes; reset in init, not by identity.
+    window.isNotFirstRun = true;
+    engine.replaceScene('level/1');
+  }
+  function updateSpacingControl() {
+    const custom = dialog.querySelector('[name=frequency]').value === 'custom';
+    dialog.querySelector('#bonus-spacing').hidden = !custom;
+    dialog.querySelector('[name=spacing]').disabled = !custom;
+  }
+  function showSettings() {
+    if (dialog.open) return;
+    clearInput();
+    if (finishDialog.open) finishDialog.close();
+    const form = dialog.querySelector('form');
+    for (const k of ['start','target','currency','custom','frequency','spacing','bonusSize','jumpStrength']) form.elements[k].value = settings[k];
+    form.querySelectorAll('[name=enabled]').forEach(e => { e.checked = settings.enabled.includes(Number(e.value)); });
+    dialog.querySelector('#bonus-status').textContent = '';
+    updateSpacingControl(); dialog.showModal();
+  }
+  function showFinish() {
+    if (finishDialog.open || dialog.open) return;
+    finishDialog.querySelector('.finish-balance').textContent = amount();
+    finishDialog.showModal();
+  }
+  function complete(scene) {
+    if (finished) return;
+    finished = true; clearInput();
+    const hero = scene.all['main-hero'];
+    hero.xSpeed = hero.ySpeed = 0;
+    scene.currentXSpeed = scene.currentYSpeed = 0;
+    // Updates are frozen; preserve the original current pose without a death animation.
+    scene.all.bgMusic?.stop(); showFinish();
+  }
+  openButton.onclick = showSettings;
+  dialog.querySelector('#bonus-close').onclick = () => dialog.close();
+  dialog.querySelector('[name=frequency]').onchange = updateSpacingControl;
+  dialog.addEventListener('close', () => { if (finished) showFinish(); });
+  finishDialog.addEventListener('cancel', e => e.preventDefault());
+  finishDialog.querySelector('#bonus-restart').onclick = restart;
+  finishDialog.querySelector('#bonus-configure').onclick = showSettings;
+  document.addEventListener('keydown', e => {
+    if (e.key === 'F2') {
+      e.preventDefault(); e.stopImmediatePropagation();
+      dialog.open ? dialog.close() : showSettings();
+    } else if (dialog.open || finishDialog.open) {
+      // Keep normal typing, dialog navigation and Escape; isolate game listeners.
+      e.stopPropagation();
+    }
+  }, true);
+  for (const d of [dialog, finishDialog]) {
+    for (const event of ['pointerdown','mousedown','touchstart']) d.addEventListener(event, e => e.stopPropagation());
+  }
+  dialog.querySelector('form').onsubmit = e => {
+    e.preventDefault();
+    const form = e.target;
+    const value = Object.fromEntries(['start','target','currency','custom','frequency','spacing','bonusSize','jumpStrength'].map(k => [k, form.elements[k].value]));
+    value.enabled = [...form.querySelectorAll('[name=enabled]:checked')].map(e => Number(e.value));
+    const next = normalize(value);
+    if (next.target <= next.start) {
+      dialog.querySelector('#bonus-status').textContent = 'Целевой баланс должен быть больше начального.'; return;
+    }
+    try { localStorage.setItem(KEY, JSON.stringify(next)); }
+    catch { dialog.querySelector('#bonus-status').textContent = 'Браузер запретил локальное сохранение.'; return; }
+    settings = next; finished = false; dialog.close(); restart();
+  };
+
   const overlay = document.createElement('canvas');
   overlay.id = 'area51-bonuses';
   overlay.style.cssText = 'position:fixed;pointer-events:none;z-index:10;max-width:none;max-height:none';
   document.body.append(overlay);
   const ctx = overlay.getContext('2d');
-  const style = document.createElement('style');
-  style.textContent = '#bonus-settings{border:1px solid #4bdc9b;border-radius:16px;background:#10241e;color:#eefef4;font:16px system-ui;width:min(420px,85vw);padding:24px;z-index:100}#bonus-settings::backdrop{background:#000a}#bonus-settings label{display:block;margin:14px 0}#bonus-settings input:not([type=checkbox]),#bonus-settings select{display:block;box-sizing:border-box;width:100%;padding:8px;margin-top:5px}#bonus-settings button,#bonus-open{padding:9px 14px;border:0;border-radius:7px;background:#83ffc0;color:#10241e;cursor:pointer}#bonus-open{position:fixed;bottom:12px;right:12px;z-index:20}#bonus-settings fieldset label{display:inline-block;margin:8px}#bonus-status{color:#ffda86}';
-  document.head.append(style);
-  const dialog = document.createElement('dialog');
-  dialog.id = 'bonus-settings';
-  dialog.innerHTML = `<form><h2>Виртуальные бонусы</h2><p>Только игровые очки. Без ставок и выплат.</p><label>Стартовый баланс<input name="start" type="number" min="0" max="9007199254740991" step="1" required></label><label>Валюта<select name="currency"><option>Bs</option><option>PHP</option><option>THB</option><option>USD</option><option>RUB</option><option value="custom">Свой символ</option></select></label><label>Свой символ<input name="custom" maxlength="12"></label><label>Шанс бонуса на платформе (%)<input name="frequency" type="number" min="0" max="100" required></label><fieldset><legend>Доступные множители баланса</legend>${[2,3,5,10].map(n => `<label><input type="checkbox" name="multiplier" value="${n}"> ×${n}</label>`).join('')}</fieldset><p>Сохранение сбрасывает баланс к стартовому и обновляет бонусы.</p><p id="bonus-status" role="status"></p><button type="submit">Сохранить</button> <button type="button" id="bonus-close">Закрыть</button></form>`;
-  document.body.append(dialog);
-  const open = document.createElement('button'); open.id = 'bonus-open'; open.textContent = 'Бонусы · F2'; document.body.append(open);
-  function show() {
-    if (dialog.open) return;
-    const f = dialog.querySelector('form');
-    for (const k of ['start','currency','custom','frequency']) f.elements[k].value = settings[k];
-    f.querySelectorAll('[name=multiplier]').forEach(e => e.checked = settings.multipliers.includes(Number(e.value)));
-    dialog.showModal();
+  function label(text, x, y, color, size, maxWidth = 100000) {
+    ctx.font = `900 ${size}px system-ui`; ctx.textAlign = 'center'; ctx.lineJoin = 'round';
+    ctx.lineWidth = Math.max(5,size/6); ctx.strokeStyle = '#061c22'; ctx.strokeText(text,x,y,maxWidth);
+    ctx.fillStyle = color; ctx.fillText(text,x,y,maxWidth);
   }
-  open.onclick = show;
-  dialog.querySelector('#bonus-close').onclick = () => dialog.close();
-  document.addEventListener('keydown', e => { if (e.key === 'F2') { e.preventDefault(); e.stopImmediatePropagation(); dialog.open ? dialog.close() : show(); } else if (dialog.open) e.stopPropagation(); }, true);
-  dialog.addEventListener('pointerdown', e => e.stopPropagation());
-  dialog.querySelector('form').onsubmit = e => {
-    e.preventDefault(); const f = e.target;
-    const next = normalize({start:f.elements.start.value,currency:f.elements.currency.value,custom:f.elements.custom.value,frequency:f.elements.frequency.value,multipliers:[...f.querySelectorAll('[name=multiplier]:checked')].map(e => Number(e.value))});
-    try { localStorage.setItem(KEY, JSON.stringify(next)); } catch { dialog.querySelector('#bonus-status').textContent = 'Браузер запретил локальное сохранение.'; return; }
-    settings = next; balance = settings.start; items = []; particles = []; seen = new WeakSet(); dialog.close();
-  };
-  const amount = () => `${Math.floor(balance).toLocaleString('ru-RU')} ${settings.currency === 'custom' ? settings.custom : settings.currency}`;
-  function label(text, x, y, color, size = 22) {
-    ctx.font = `bold ${size}px system-ui`; ctx.textAlign = 'center'; ctx.lineWidth = 5; ctx.strokeStyle = '#09231e'; ctx.strokeText(text,x,y); ctx.fillStyle = color; ctx.fillText(text,x,y);
+  function point(node, x, y) { return node.toGlobal({x,y}); }
+  function surfaceFor(item) {
+    const ground = item.ground;
+    return {x:ground.x+item.offset, y:ground.y+item.offset/ground.groundWidth*ground.groundYShift};
   }
-  window.installArea51Bonuses = ({Gameplay, GroundItem, engine}) => {
-    const initGround = GroundItem.prototype.initGroundItem;
-    GroundItem.prototype.initGroundItem = function(...args) {
-      seen.delete(this); items = items.filter(item => item.ground !== this);
+  function reset(scene) {
+    activeScene = scene; balance = settings.start; finished = false; restarting = false;
+    items = []; particles = []; seen = new WeakSet(); nextSpawnX = -Infinity;
+    if (finishDialog.open) finishDialog.close();
+  }
+  function spawn(scene) {
+    const hero = scene.all['main-hero'];
+    // Intro floor is scripted and should not receive random collectibles.
+    if (!hero.jumpEnabled || !settings.enabled.length) return;
+    const distance = scene.currentDistance*90;
+    const spacing = PRESETS[settings.frequency] || settings.spacing;
+    const radius = 24*settings.bonusSize;
+    for (const ground of scene.groundLayer.children) {
+      if (seen.has(ground)) continue;
+      seen.add(ground);
+      if (ground.enemy || !ground.nextPointer || ground.groundWidth < radius*2+4) continue;
+      const offset = ground.groundWidth/2;
+      const position = ground.x+offset;
+      const worldX = distance+position;
+      // Only ahead of the hero; reserve a random, guaranteed minimum gap.
+      if (position < hero.x+radius+100 || worldX < nextSpawnX) continue;
+      items.push({ground,offset,value:settings.enabled[Math.floor(Math.random()*settings.enabled.length)],radius});
+      nextSpawnX = worldX+spacing*(1+Math.random()*.6);
+    }
+  }
+  function collect(scene) {
+    const hero = scene.all['main-hero'];
+    if (hero.die || !hero.scale.x || !hero.jumpEnabled) return;
+    // Collision is in the same parent space used by the original ground physics.
+    // Hero torso-to-feet capsule, avoiding the wide decorative animation bounds.
+    const x = hero.x, top = hero.y-260, bottom = hero.y;
+    items = items.filter(item => {
+      if (finished) return true;
+      const surface = surfaceFor(item);
+      const centerY = surface.y-item.radius;
+      const dx = Math.max(0, Math.abs(x-surface.x)-32);
+      const dy = centerY < top ? top-centerY : centerY > bottom ? centerY-bottom : 0;
+      if (dx*dx+dy*dy > item.radius*item.radius) return true;
+      balance = Math.min(MAX, item.value>0 ? balance+item.value : balance*-item.value);
+      particles.push({text:textFor(item.value),x:surface.x,y:centerY,life:55});
+      if (balance >= settings.target) complete(scene);
+      return false;
+    });
+  }
+  function draw() {
+    const scene = activeScene;
+    overlay.style.visibility = scene && engine.currentScene === scene ? 'visible' : 'hidden';
+    if (!scene || engine.currentScene !== scene) return;
+    const canvas = document.querySelector('canvas:not(#area51-bonuses)');
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const resolution = engine.pixiApp?.renderer?.resolution || 1;
+    overlay.style.left=`${rect.left}px`; overlay.style.top=`${rect.top}px`;
+    overlay.style.width=`${rect.width}px`; overlay.style.height=`${rect.height}px`;
+    if (overlay.width!==canvas.width || overlay.height!==canvas.height) { overlay.width=canvas.width; overlay.height=canvas.height; }
+    ctx.setTransform(resolution,0,0,resolution,0,0);
+    ctx.clearRect(0,0,canvas.width/resolution,canvas.height/resolution);
+    const hero=scene.all['main-hero'];
+    for (const item of items) {
+      const surface=surfaceFor(item), p=point(item.ground.parent,surface.x,surface.y-item.radius);
+      const edge=point(item.ground.parent,surface.x+item.radius,surface.y-item.radius);
+      const radius=Math.hypot(edge.x-p.x,edge.y-p.y);
+      const glow=ctx.createRadialGradient(p.x-radius*.3,p.y-radius*.4,1,p.x,p.y,radius);
+      glow.addColorStop(0,item.value>0?'#fff6b1':'#e9deff');glow.addColorStop(1,item.value>0?'#f4ae21':'#9062e9');
+      ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);ctx.fillStyle=glow;ctx.fill();
+      ctx.strokeStyle='#fff2c4';ctx.lineWidth=3;ctx.stroke();
+      label(textFor(item.value),p.x,p.y+radius*.21,'#fff',radius*.7,radius*1.85);
+    }
+    if (hero?.scale.x && !hero.die) {
+      // Fixed local anchor, transformed with the hero and camera. Never use
+      // getBounds(): animated limbs/particles change those bounds every frame.
+      const anchor=point(hero,0,-350), right=point(hero,1,-350);
+      const scale=Math.hypot(right.x-anchor.x,right.y-anchor.y);
+      label(amount(),anchor.x,anchor.y,'#afffd3',50*scale);
+    }
+    for (const particle of particles) {
+      const p=point(scene.groundLayer,particle.x,particle.y);
+      ctx.globalAlpha=particle.life/55;label(particle.text,p.x,p.y,'#fff39a',44);ctx.globalAlpha=1;
+    }
+  }
+  window.installArea51Bonuses = ({Gameplay, GroundItem, engine: game}) => {
+    engine=game;
+    const initGround=GroundItem.prototype.initGroundItem;
+    GroundItem.prototype.initGroundItem=function(...args) {
+      seen.delete(this);items=items.filter(item=>item.ground!==this);
       return initGround.apply(this,args);
     };
-    const original = Gameplay.prototype.update;
-    const api = {engine, get balance(){return balance;}, get settings(){return {...settings, multipliers:[...settings.multipliers]};}, get items(){return items;}};
-    window.area51Bonuses = api;
-    Gameplay.prototype.update = function(...args) {
-      if (dialog.open) return;
-      original.apply(this,args);
-      if (activeScene !== this) { activeScene = this; items = []; particles = []; seen = new WeakSet(); balance = settings.start; }
-      const hero = this.all['main-hero'];
-      if (!hero || !this.groundLayer) return;
-      for (const ground of this.groundLayer.children) {
-        if (seen.has(ground)) continue; seen.add(ground);
-        if (ground.enemy || ground.groundWidth < 65 || Math.random()*100 >= settings.frequency) continue;
-        const pool = [100,500,1000,5000,...settings.multipliers.map(n => -n)];
-        items.push({ground, offset:32+Math.random()*(ground.groundWidth-64), value:pool[Math.floor(Math.random()*pool.length)]});
-      }
-      const canvas = engine.pixiApp?.view || document.querySelector('canvas:not(#area51-bonuses)');
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      overlay.style.left = `${rect.left}px`; overlay.style.top = `${rect.top}px`; overlay.style.width = `${rect.width}px`; overlay.style.height = `${rect.height}px`;
-      if (overlay.width !== canvas.width || overlay.height !== canvas.height) { overlay.width=canvas.width; overlay.height=canvas.height; }
-      ctx.clearRect(0,0,overlay.width,overlay.height);
-      const h = hero.parent.toGlobal({x:hero.x,y:hero.y});
-      const alive = !hero.die && hero.scale.x !== 0;
-      items = items.filter(item => {
-        const g=item.ground;
-        if (g.parent !== this.groundLayer || !this.groundLayer.children.includes(g)) return false;
-        const x=g.x+item.offset, surface=g.y+item.offset/g.groundWidth*g.groundYShift;
-        const p=g.parent.toGlobal({x,y:surface-25});
-        const text=item.value>0?`+${item.value}`:`×${-item.value}`;
-        if (alive && Math.abs(hero.x-x)<35 && hero.y>surface-80 && hero.y<surface+18) {
-          balance = Math.min(Number.MAX_SAFE_INTEGER, Math.floor(item.value>0?balance+item.value:balance*-item.value));
-          particles.push({text,x:p.x,y:p.y,life:45});
-          return false;
-        }
-        ctx.beginPath();ctx.arc(p.x,p.y,24,0,Math.PI*2);ctx.fillStyle=item.value>0?'#ffce43':'#b595ff';ctx.fill();ctx.strokeStyle='#fff5bd';ctx.lineWidth=2;ctx.stroke();
-        label(text,p.x,p.y+6,'#fff',17); return true;
-      });
-      if (alive) label(amount(),h.x,Math.max(28,hero.getBounds().y-16),'#9bffcb');
-      particles = particles.filter(p => {ctx.globalAlpha=p.life/45;label(p.text,p.x,p.y,'#fff090',26);ctx.globalAlpha=1;p.y-=1.5;return --p.life>0;});
+    const init=Gameplay.prototype.init, update=Gameplay.prototype.update;
+    Gameplay.prototype.init=function(...args) {init.apply(this,args);reset(this);};
+    Gameplay.prototype.update=function(...args) {
+      if (dialog.open || finished || restarting) return;
+      update.apply(this,args);
+      if (engine.currentScene!==this || !this.all['main-hero']) return;
+      items=items.filter(item=>item.ground.parent===this.groundLayer && this.groundLayer.children.includes(item.ground));
+      if (!this.all['main-hero'].die) {spawn(this);collect(this);}
+      particles=particles.filter(p=>{p.y-=1.5;return --p.life>0;});
     };
-    // Hide the gameplay overlay when a menu or another scene is active.
-    function visibility(){overlay.style.visibility=engine.currentScene===activeScene?'visible':'hidden';requestAnimationFrame(visibility);}visibility();
+    function updateCamera(scene) {
+      const hero=scene.all['main-hero'];
+      if (!hero?.jumpEnabled) {
+        // Preserve the original scripted breakout choreography and fast-forward.
+        const reference=scene.groundLayer.children[7] || scene.latestGround;
+        scene.currentYSpeed=(scene.currentYSpeed+.01*(engine.H/2+160-reference.y))*.8;
+        return;
+      }
+      if (hero.die) {scene.currentYSpeed=0;return;}
+      const surface=scene.getGroundY(hero.x);
+      const predictedHead=hero.y+hero.ySpeed-365;
+      if (!Number.isFinite(surface)) {
+        // In a gap, preserve the camera's safety margin without following a fall.
+        scene.currentYSpeed=clamp(Math.max(scene.currentYSpeed*.8, predictedHead<95 ? 95-predictedHead : 0),-38,38,0);
+        return;
+      }
+      const baseline=engine.H*.82;
+      const airHeight=Math.max(0,surface-hero.y);
+      // Follow the ground at the runner, not the eighth platform ahead.
+      // Lift the camera during a high jump while keeping actual jump velocity.
+      const desired=baseline+Math.max(0,airHeight-(baseline-455));
+      let speed=(desired-surface)*.14;
+      if (predictedHead<95) speed=Math.max(speed,95-predictedHead);
+      scene.currentYSpeed=clamp(speed,-38,38,0);
+    }
+    const api={engine,updateCamera,
+      get balance(){return balance;},get finished(){return finished;},
+      get settings(){return {...settings,enabled:[...settings.enabled]};},
+      get items(){return items.map(item=>({...item}));}
+    };
+    window.area51Bonuses=api;
+    // Render after the engine updates transforms, including while a dialog is open.
+    function render(){draw();requestAnimationFrame(render);}requestAnimationFrame(render);
   };
 })();
